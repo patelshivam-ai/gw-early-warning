@@ -1,18 +1,3 @@
-"""
-BNS injection pipeline using ml4gw.
-
-What this does:
-  1. Generates a 1.4+1.4 Msun BNS waveform with IMRPhenomD
-  2. Projects it onto H1 and L1 detectors
-  3. Injects it into Gaussian noise coloured by the aLIGO PSD
-  4. Plots the network input: 2-channel (H1, L1) strain time series
-     showing both the pure noise and signal+noise cases side by side
-
-Network input/output framing (for Bhavya):
-  - INPUT:  (batch, 2, samples) tensor — 2-channel strain from H1+L1
-  - OUTPUT: scalar detection stat or time-of-arrival for early warning
-"""
-
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,16 +5,14 @@ from ml4gw.waveforms import IMRPhenomD
 from ml4gw.waveforms.generator import TimeDomainCBCWaveformGenerator
 from ml4gw.waveforms.conversion import chirp_mass_and_mass_ratio_to_components
 
-# ── configuration ────────────────────────────────────────────────────────────
 SAMPLE_RATE = 2048
-DURATION    = 4        # seconds
+DURATION    = 4
 F_MIN       = 20.0
 F_REF       = 20.0
 SEED        = 42
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
-# ── 1. generate BNS waveform ─────────────────────────────────────────────────
 chirp_mass = torch.tensor([1.2189])
 mass_ratio = torch.tensor([1.0])
 mass_1, mass_2 = chirp_mass_and_mass_ratio_to_components(chirp_mass, mass_ratio)
@@ -39,7 +22,7 @@ params = {
     "mass_2":      mass_2,
     "s1z":         torch.tensor([0.0]),
     "s2z":         torch.tensor([0.0]),
-    "distance":    torch.tensor([100.0]),   # Mpc
+    "distance":    torch.tensor([100.0]), 
     "phic":        torch.tensor([0.0]),
     "inclination": torch.tensor([0.0]),
     "chirp_mass":  chirp_mass,
@@ -59,26 +42,20 @@ generator = TimeDomainCBCWaveformGenerator(
 
 hc, hp = generator(**params)
 assert not torch.all(torch.isnan(hp)), "Waveform is all NaN — check params"
-hp = torch.nan_to_num(hp, nan=0.0)   # shape: (1, N)
+hp = torch.nan_to_num(hp, nan=0.0) 
 hc = torch.nan_to_num(hc, nan=0.0)
 
 print(f"Waveform shape: {hp.shape}  |  samples: {hp.shape[-1]}")
 
-# ── 2. project onto H1 and L1 ────────────────────────────────────────────────
-# Detector antenna response for a source overhead (simple fixed case)
-# F+ and Fx for H1 and L1 at ra=0, dec=0, psi=0  (illustrative values)
-# Real pipeline would sample these from distributions
 F_plus_H1,  F_cross_H1  =  0.6,  0.4
 F_plus_L1,  F_cross_L1  = -0.4,  0.6
 
-h_H1 = F_plus_H1 * hp + F_cross_H1 * hc   # (1, N)
-h_L1 = F_plus_L1 * hp + F_cross_L1 * hc   # (1, N)
+h_H1 = F_plus_H1 * hp + F_cross_H1 * hc  
+h_L1 = F_plus_L1 * hp + F_cross_L1 * hc   
 
-# Stack into (1, 2, N) — batch=1, channels=2 (H1, L1)
 signal = torch.cat([h_H1, h_L1], dim=0).unsqueeze(0)
 print(f"Projected signal shape: {signal.shape}  →  (batch, detectors, samples)")
 
-# ── 3. colour Gaussian noise with aLIGO PSD ──────────────────────────────────
 N       = hp.shape[-1]
 freqs   = np.fft.rfftfreq(N, d=1.0 / SAMPLE_RATE)
 df      = freqs[1] - freqs[0]
@@ -99,30 +76,26 @@ def aligo_psd(f):
 
 psd   = aligo_psd(freqs)
 psd[psd <= 0] = 1e-80
-sigma = np.sqrt(psd / (2 * df))   # amplitude per frequency bin
+sigma = np.sqrt(psd / (2 * df)) 
 
 def coloured_noise(sigma):
-    """Generate one stretch of aLIGO-coloured Gaussian noise."""
     wn_fd  = (np.random.randn(len(sigma)) + 1j * np.random.randn(len(sigma)))
     cn_fd  = wn_fd * sigma
     cn_td  = np.fft.irfft(cn_fd, n=N)
     return torch.tensor(cn_td, dtype=torch.float32)
 
-noise_H1 = coloured_noise(sigma)   # (N,)
-noise_L1 = coloured_noise(sigma)   # (N,)
+noise_H1 = coloured_noise(sigma)   
+noise_L1 = coloured_noise(sigma)   
 
-# Stack noise into same shape as signal: (1, 2, N)
 noise = torch.stack([noise_H1, noise_L1], dim=0).unsqueeze(0)
 
-# ── 4. network input = signal + noise ────────────────────────────────────────
-network_input = signal + noise   # (1, 2, N)  ← this is what the model sees
+network_input = signal + noise   
 
 print(f"Network input tensor shape: {network_input.shape}")
 print(f"  dim 0 = batch size  ({network_input.shape[0]})")
 print(f"  dim 1 = detectors   ({network_input.shape[1]}: H1, L1)")
 print(f"  dim 2 = time samples ({network_input.shape[2]} @ {SAMPLE_RATE} Hz = {DURATION}s)")
 
-# ── 5. plot ───────────────────────────────────────────────────────────────────
 t = np.linspace(0, DURATION, N)
 
 fig, axes = plt.subplots(2, 2, figsize=(13, 6), sharey="row")
@@ -130,12 +103,10 @@ det_labels = ["H1", "L1"]
 colors     = ["steelblue", "darkorange"]
 
 for i, (label, color) in enumerate(zip(det_labels, colors)):
-    # pure noise
     axes[i][0].plot(t, noise[0, i].numpy(), color=color, lw=0.6, alpha=0.8)
     axes[i][0].set_title(f"{label} — noise only")
     axes[i][0].set_ylabel("Strain")
 
-    # signal + noise
     axes[i][1].plot(t, network_input[0, i].detach().numpy(), color=color, lw=0.6, alpha=0.8)
     axes[i][1].set_title(f"{label} — signal + noise  (BNS @ 100 Mpc)")
 
